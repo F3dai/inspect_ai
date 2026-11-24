@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterator
 from typing import Any, Literal, TextIO, cast
 
 import click
+import rich
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -14,16 +15,21 @@ from pydantic import (
     ValidationError,
     field_validator,
 )
+from rich import box
+from rich.table import Table
 from typing_extensions import Unpack
 
-from inspect_ai import Epochs, eval, eval_retry
+from inspect_ai import Epochs, eval, eval_branch, eval_retry
 from inspect_ai._eval.evalset import eval_set
 from inspect_ai._eval.handoff import (
     LaunchHandoff,
     set_ctl_pointer_armed,
     set_launch_handoff_listener,
 )
+from inspect_ai._eval.task.util import sample_id_filter
 from inspect_ai._sentinel._config import SentinelProxy, sentinel_with_args
+from inspect_ai._util._async import run_coroutine
+from inspect_ai._util.asyncfiles import with_async_fs
 from inspect_ai._util.config import parse_cli_args, resolve_args
 from inspect_ai._util.constants import (
     ALL_LOG_LEVELS,
@@ -47,7 +53,7 @@ from inspect_ai._util.generate_config_args import (
 from inspect_ai._util.samples import parse_sample_id, parse_samples_limit
 from inspect_ai.approval._policy import ApprovalPolicyConfig
 from inspect_ai.log import IncompleteAction
-from inspect_ai.log._file import log_file_info
+from inspect_ai.log._file import log_file_info, read_eval_log_sample_summaries
 from inspect_ai.log._log import EvalConfig, EvalLog
 from inspect_ai.model import GenerateConfig, GenerateConfigArgs, Model
 from inspect_ai.model._generate_config import (  # noqa: F811
@@ -57,6 +63,13 @@ from inspect_ai.model._generate_config import (  # noqa: F811
 from inspect_ai.model._model_config import ModelConfig, model_config_to_model
 from inspect_ai.scorer._reducer import create_reducers
 from inspect_ai.solver._solver import SolverSpec
+from inspect_ai.util._checkpoint import CheckpointConfig
+from inspect_ai.util._checkpoint._layout import (
+    eval_checkpoints_dir_from_config,
+    sample_checkpoints_dir,
+)
+from inspect_ai.util._checkpoint._layout.schemas import Checkpoint
+from inspect_ai.util._checkpoint._resume_copy import branchable_checkpoints
 from inspect_ai.util._checkpoint.parse_cli import parse_checkpoint
 from inspect_ai.util._limit import TokenLimit
 from inspect_ai.util._sandbox.environment import SandboxEnvironmentSpec
@@ -149,6 +162,7 @@ STREAM_IDLE_TIMEOUT_HELP = "Timeout (in seconds) on silence within a streaming r
 CACHE_HELP = "Policy for caching of model generations. Specify --cache to cache with 7 day expiration (7D). Specify an explicit duration (e.g. (e.g. 1h, 3d, 6M) to set the expiration explicitly (durations can be expressed as s, m, h, D, W, M, or Y). Alternatively, pass the file path to a YAML or JSON config file with a full `CachePolicy` configuration."
 BATCH_HELP = "Batch requests together to reduce API calls when using a model that supports batching (by default, no batching). Specify --batch to batch with default configuration,  specify a batch size e.g. `--batch=1000` to configure batches of 1000 requests, or pass the file path to a YAML or JSON config file with batch configuration."
 CHECKPOINT_HELP = "Periodically checkpoint sample state so the eval can be resumed via `inspect eval retry`. Specify --checkpoint for the default (every 500k tokens), --checkpoint=token:N{k,m,b} / time:N{s,m,h,d} / turn:N / manual for a shorthand trigger, or pass a YAML/JSON file path for a full CheckpointConfig."
+BRANCH_CHECKPOINT_HELP = "Checkpoint configuration for the branch, as for eval (by default, checkpoints with the default trigger). The log does not record the configuration of the eval branched from: when it was given by --checkpoint rather than declared by the task, pass the same value here."
 INCOMPLETE_ACTION_HELP = "Disposition applied when recovering a crashed log, for samples that were in progress at crash: 'retry' (default) re-runs them; 'error' resolves them as operator terminations — if that leaves every expected sample final, the recovered log finalizes with status 'success' and is not re-run."
 INCOMPLETE_MAX_HELP = "Safety threshold for --incomplete-action error (count if >= 1, or proportion of expected samples if strictly less than 1): when more than this many samples are in progress, fall back to the default recover-and-retry behavior. Has no effect (a warning is logged) with --incomplete-action retry."
 
@@ -2966,3 +2980,135 @@ def eval_retry_command(
             _eval_exec_json(lambda: (True, run_retry()))
         else:
             run_retry()
+
+
+@click.command("eval-branch")
+@click.argument("log_file", required=True)
+@click.option("--sample-id", type=str, help="Sample to branch.")
+@click.option(
+    "--epoch", type=int, help="Epoch of the sample to branch (defaults to 1)."
+)
+@click.option(
+    "--checkpoint-id",
+    type=int,
+    help="Checkpoint of the sample to start from. Omit it to list the checkpoints a branch can start from.",
+)
+@click.option(
+    "--model",
+    type=str,
+    help="Model to continue with (defaults to the model of the eval branched from).",
+)
+@click.option(
+    "--message",
+    type=str,
+    help="User message to add to the conversation at the branch point.",
+)
+@click.option(
+    "--checkpoint",
+    is_flag=False,
+    flag_value="default",
+    default=None,
+    help=BRANCH_CHECKPOINT_HELP,
+    envvar="INSPECT_EVAL_CHECKPOINT",
+)
+@click.option(
+    "--no-sandbox-cleanup",
+    type=bool,
+    is_flag=True,
+    help=NO_SANDBOX_CLEANUP_HELP,
+    envvar="INSPECT_EVAL_NO_SANDBOX_CLEANUP",
+)
+@common_options
+def eval_branch_command(
+    log_file: str,
+    sample_id: str | None,
+    epoch: int | None,
+    checkpoint_id: int | None,
+    model: str | None,
+    message: str | None,
+    checkpoint: str | None,
+    no_sandbox_cleanup: bool | None,
+    **common: Unpack[CommonOptions],
+) -> None:
+    """Branch an evaluation from a checkpoint.
+
+    Runs one sample of LOG_FILE again as a new eval that starts at a
+    checkpoint the sample committed rather than at the beginning, and
+    continues from there (with another model or an added user message, if
+    given). The eval branched from is not modified.
+
+    Without --checkpoint-id, lists the checkpoints a branch can start from.
+
+    This runs code named by the log (its task file, scorers and solver) and
+    uses the sandbox and other settings recorded in it. Only run it on logs
+    you trust.
+    """
+    process_common_options(common)
+
+    # a branch restores a checkpoint, so checkpointing is always on
+    checkpoint_config = parse_checkpoint(checkpoint) or CheckpointConfig()
+
+    if checkpoint_id is None:
+        _print_branch_checkpoints(log_file, sample_id, epoch, checkpoint_config)
+        return
+    if sample_id is None:
+        raise click.UsageError("--checkpoint-id requires --sample-id.")
+
+    eval_branch(
+        log_file,
+        sample_id=sample_id,
+        checkpoint_id=checkpoint_id,
+        epoch=epoch or 1,
+        model=model,
+        message=message,
+        checkpoint=checkpoint_config,
+        log_dir=common["log_dir"],
+        log_level=common["log_level"],
+        sandbox_cleanup=False if no_sandbox_cleanup else None,
+        debug_errors=common["debug_errors"],
+    )
+
+
+def _print_branch_checkpoints(
+    log_file: str,
+    sample_id: str | None,
+    epoch: int | None,
+    checkpoint: CheckpointConfig,
+) -> None:
+    """Print the checkpoints of a log's samples that a branch can start from."""
+    checkpoints_dir = eval_checkpoints_dir_from_config(log_file, None, checkpoint)
+    if checkpoints_dir is None:
+        raise PrerequisiteError("A branch cannot run with checkpointing disabled.")
+    selected = sample_id_filter(sample_id).matches if sample_id is not None else None
+    samples = [
+        (summary.id, summary.epoch)
+        for summary in read_eval_log_sample_summaries(log_file)
+        if (selected is None or selected(summary.id))
+        and (epoch is None or summary.epoch == epoch)
+    ]
+
+    async def scan() -> list[list[Checkpoint]]:
+        return [
+            await branchable_checkpoints(sample_checkpoints_dir(checkpoints_dir, id, e))
+            for id, e in samples
+        ]
+
+    table = Table(box=box.SQUARE)
+    for column in ("Sample", "Epoch", "Checkpoint", "Trigger", "Created"):
+        table.add_column(column)
+    for (id, e), checkpoints in zip(samples, run_coroutine(with_async_fs(scan)())):
+        for checkpoint_record in checkpoints:
+            table.add_row(
+                str(id),
+                str(e),
+                str(checkpoint_record.checkpoint_id),
+                checkpoint_record.trigger,
+                f"{checkpoint_record.created_at:%Y-%m-%d %H:%M:%S}",
+            )
+    if table.row_count == 0:
+        raise PrerequisiteError(
+            f"No checkpoints a branch can start from in {checkpoints_dir}. The log "
+            "does not record the eval's checkpoint configuration: pass the same "
+            "--checkpoint value the eval ran with."
+        )
+    rich.print(table)

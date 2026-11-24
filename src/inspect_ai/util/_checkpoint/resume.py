@@ -10,7 +10,7 @@ a committed checkpoint here or it runs fresh.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from ._layout.sample_checkpoints_dir import (
     sample_checkpoints_dir,
@@ -18,11 +18,22 @@ from ._layout.sample_checkpoints_dir import (
 )
 from .checkpointer import ResumeCheckpoint
 
+if TYPE_CHECKING:
+    from inspect_ai.log import EvalBranch
+
 
 async def resolve_resume_checkpoint(
-    eval_checkpoints_dir: str | None, sample_id: int | str, epoch: int
+    eval_checkpoints_dir: str | None,
+    sample_id: int | str,
+    epoch: int,
+    branch: EvalBranch | None = None,
 ) -> ResumeCheckpoint | None:
-    """The sample's checkpoint resume, or ``None`` when it has nothing committed."""
+    """The sample's checkpoint resume, or ``None`` when it has nothing committed.
+
+    ``branch`` is the checkpoint the eval was branched from, if it was. Its
+    message joins the conversation on a resume from that checkpoint only:
+    every later checkpoint already holds it.
+    """
     if eval_checkpoints_dir is None:
         return None
     checkpoint = await scan_latest_committed_checkpoint(
@@ -36,4 +47,9 @@ async def resolve_resume_checkpoint(
     attempt: Literal["initial", "resume", "resume_for_scoring"] = (
         "resume_for_scoring" if checkpoint.trigger == "agent_complete" else "resume"
     )
-    return ResumeCheckpoint(attempt=attempt)
+    message = (
+        branch.message
+        if branch is not None and branch.checkpoint_id == checkpoint.checkpoint_id
+        else None
+    )
+    return ResumeCheckpoint(attempt=attempt, message=message)

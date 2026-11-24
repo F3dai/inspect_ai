@@ -2798,6 +2798,58 @@
         "title": "ErrorEvent",
         "type": "object"
       },
+      "EvalBranch": {
+        "description": "The checkpoint of another eval's sample that an eval was branched from.",
+        "properties": {
+          "checkpoint_id": {
+            "title": "Checkpoint Id",
+            "type": "integer"
+          },
+          "epoch": {
+            "title": "Epoch",
+            "type": "integer"
+          },
+          "eval_id": {
+            "title": "Eval Id",
+            "type": "string"
+          },
+          "log": {
+            "title": "Log",
+            "type": "string"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "sample_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Sample Id"
+          }
+        },
+        "required": [
+          "log",
+          "eval_id",
+          "sample_id",
+          "epoch",
+          "checkpoint_id"
+        ],
+        "title": "EvalBranch",
+        "type": "object"
+      },
       "EvalConfig": {
         "description": "Configuration used for evaluation.",
         "properties": {
@@ -5401,6 +5453,16 @@
       "EvalSpec": {
         "description": "Eval target and configuration.",
         "properties": {
+          "branch": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvalBranch"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "config": {
             "$ref": "#/components/schemas/EvalConfig"
           },

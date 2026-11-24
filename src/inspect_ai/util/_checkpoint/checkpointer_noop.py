@@ -47,6 +47,9 @@ class _NoopCheckpointer(contextlib.AbstractAsyncContextManager[Checkpointer]):
     def current(self) -> Checkpointer | None:
         return self if self._entered else None
 
+    def take_resume_message(self) -> str | None:
+        return None
+
     def track(
         self,
         key: str,

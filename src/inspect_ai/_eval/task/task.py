@@ -43,7 +43,7 @@ from inspect_ai.approval._policy import (
     approval_policies_from_config,
 )
 from inspect_ai.dataset import Dataset, MemoryDataset, Sample
-from inspect_ai.log import EvalLog, EvalLogInfo, HeadlineMetric
+from inspect_ai.log import EvalBranch, EvalLog, EvalLogInfo, HeadlineMetric
 from inspect_ai.model import GenerateConfig
 from inspect_ai.model._model import Model, ModelRoles
 from inspect_ai.model._util import resolve_model, resolve_model_roles
@@ -584,6 +584,8 @@ class PreviousTask:
     sandbox: SandboxEnvironmentSpec | None
     log: EvalLog
     log_info: EvalLogInfo | None
+    # start a branch from this checkpoint of `log` rather than retrying it
+    branch: EvalBranch | None = None
 
 
 def resolve_approval(

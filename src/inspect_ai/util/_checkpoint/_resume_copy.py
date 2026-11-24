@@ -24,16 +24,21 @@ The design is one rule with two supports:
   copied, so the copy needs no internal ordering.
 - **The copy replicates the whole attempt.** Every sample dir the
   source has is copied — completed samples included. Checkpoints are a
-  permanent record (planned work allows branching from arbitrary
-  checkpoints), so each attempt with a log is a complete,
-  self-contained archive and everything older is superseded. The one
-  exception: a sample that re-runs from scratch in this attempt (an
-  invalidated prior, or a dir with no committed checkpoint) has its
-  copied dir discarded before it starts.
+  permanent record (a branch can start from any of them), so each
+  attempt with a log is a complete, self-contained archive and
+  everything older is superseded. The one exception: a sample that
+  re-runs from scratch in this attempt (an invalidated prior, or a dir
+  with no committed checkpoint) has its copied dir discarded before it
+  starts.
 
 Resume detection then never looks past a sample's own dir
 (``resolve_resume_checkpoint``): a sample either has a committed
 checkpoint in this attempt or it runs fresh.
+
+A branch (``copy_branch_payload``) is the same transport for one sample,
+stopped at a chosen checkpoint: the copy leaves out the checkpoint files
+after it, so the same resume detection finds that checkpoint as the
+sample's latest.
 """
 
 from __future__ import annotations
@@ -50,11 +55,17 @@ from inspect_ai._util.asyncfiles import (
     is_s3_filename,
     s3_bucket_and_key,
 )
+from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.file import dirname, filesystem, local_path
 from inspect_ai._util.trace import trace_action
 
 from ._async_fs import async_mkdir
 from ._layout._paths import contained_component, contained_relative
+from ._layout.sample_checkpoints_dir import (
+    checkpoint_file_id,
+    scan_committed_checkpoints,
+)
+from ._layout.schemas import Checkpoint
 
 logger = getLogger(__name__)
 
@@ -130,6 +141,73 @@ async def _copy_sample_dir(
         await copy_payload_files(source_dir, destination_dir)
 
 
+async def branchable_checkpoints(sample_dir: str) -> list[Checkpoint]:
+    """The checkpoints in ``sample_dir`` that a branch can start from, in id order.
+
+    A branch resumes the agent from the checkpoint, so it must be committed
+    (its file parses) and must not be the ``agent_complete`` checkpoint, from
+    which a resume only re-scores.
+    """
+    committed = await scan_committed_checkpoints(local_path(sample_dir))
+    return [c for c in committed if c.trigger != "agent_complete"]
+
+
+async def branchable_checkpoint(sample_dir: str, checkpoint_id: int) -> Checkpoint:
+    """The checkpoint ``checkpoint_id`` in ``sample_dir``, if a branch can start from it.
+
+    Raises:
+        PrerequisiteError: a branch cannot (see ``branchable_checkpoints``).
+            The message lists the checkpoints one can start from.
+    """
+    branchable = await branchable_checkpoints(sample_dir)
+    for checkpoint in branchable:
+        if checkpoint.checkpoint_id == checkpoint_id:
+            return checkpoint
+    ids = ", ".join(str(c.checkpoint_id) for c in branchable) or "none"
+    raise PrerequisiteError(
+        f"A branch cannot start from checkpoint {checkpoint_id} in {sample_dir}. "
+        f"Checkpoints a branch can start from: {ids}."
+    )
+
+
+async def copy_branch_payload(
+    *,
+    source_sample_dir: str,
+    destination_sample_dir: str,
+    checkpoint_id: int,
+) -> None:
+    """Start a sample's checkpoint lineage at another sample's checkpoint.
+
+    Copies ``source_sample_dir`` without the checkpoint files after
+    ``checkpoint_id``. A checkpoint file is the commit point, so
+    ``checkpoint_id`` is the destination's latest committed checkpoint:
+    resume restores it, discards the later snapshots the copy carried as
+    orphans, and numbers the next checkpoint ``checkpoint_id + 1``.
+    Storage areas are copied verbatim, as in ``copy_resume_payloads``, and
+    the source is only read.
+
+    Runs before the destination log's first write, for the reason given on
+    ``copy_resume_payloads``.
+
+    Raises:
+        PrerequisiteError: see ``branchable_checkpoint``.
+    """
+    await branchable_checkpoint(source_sample_dir, checkpoint_id)
+
+    def at_or_before_branch(rel: str) -> bool:
+        file_id = checkpoint_file_id(rel)
+        return file_id is None or file_id <= checkpoint_id
+
+    with trace_action(
+        logger,
+        "Checkpoint Branch Copy",
+        f"sample {source_sample_dir} @ {checkpoint_id} -> {destination_sample_dir}",
+    ):
+        await copy_payload_files(
+            source_sample_dir, destination_sample_dir, include=at_or_before_branch
+        )
+
+
 async def _dir_names(base: str) -> list[str]:
     """Terminal names of ``base``'s immediate subdirectories (missing → []).
 
@@ -165,7 +243,12 @@ async def _dir_names(base: str) -> list[str]:
     return names
 
 
-async def copy_payload_files(source_dir: str, destination_dir: str) -> list[str]:
+async def copy_payload_files(
+    source_dir: str,
+    destination_dir: str,
+    *,
+    include: Callable[[str], bool] | None = None,
+) -> list[str]:
     """Copy one sample dir's checkpoint payload to another sample dir.
 
     Either side may be local or remote. Copies every file under the
@@ -175,6 +258,8 @@ async def copy_payload_files(source_dir: str, destination_dir: str) -> list[str]
     Also used by ``hydrate`` to pull a remote destination's payload into
     its local staging dir. A missing or empty source copies nothing.
 
+    ``include`` narrows the copy to the source-relative paths it accepts.
+
     Returns the list of paths written, relative to ``destination_dir``.
     ``file://`` URIs are resolved to plain paths first, for the reason
     given on ``copy_resume_payloads``.
@@ -182,6 +267,8 @@ async def copy_payload_files(source_dir: str, destination_dir: str) -> list[str]
     source_dir = local_path(source_dir)
     destination_dir = local_path(destination_dir)
     rels = await _list_payload(source_dir)
+    if include is not None:
+        rels = [rel for rel in rels if include(rel)]
     await _copy_payload_data(source_dir, destination_dir, rels)
     return rels
 

@@ -9,7 +9,12 @@ from test_helpers.utils import failing_solver_deterministic, skip_if_github_acti
 from inspect_ai import Task, eval, eval_async
 from inspect_ai._util.asyncfiles import AsyncFilesystem, get_async_filesystem
 from inspect_ai.dataset import Sample, example_dataset
-from inspect_ai.log import read_eval_log, read_eval_log_async, transcript
+from inspect_ai.log import (
+    EvalBranch,
+    read_eval_log,
+    read_eval_log_async,
+    transcript,
+)
 from inspect_ai.scorer import Score, Scorer, Target, accuracy, scorer
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 from inspect_ai.solver._prompt import system_message
@@ -49,7 +54,10 @@ async def test_retry_checkpoint_lookup_error_is_sample_local(
     lookups = 0
 
     async def failed_lookup(
-        eval_checkpoints_dir: str | None, sample_id: int | str, epoch: int
+        eval_checkpoints_dir: str | None,
+        sample_id: int | str,
+        epoch: int,
+        branch: EvalBranch | None = None,
     ) -> None:
         nonlocal lookups
         lookups += 1
@@ -103,7 +111,10 @@ async def test_retry_checkpoint_lookup_cancellation_closes_filesystem(
     original_close = AsyncFilesystem.close
 
     async def blocked_lookup(
-        eval_checkpoints_dir: str | None, sample_id: int | str, epoch: int
+        eval_checkpoints_dir: str | None,
+        sample_id: int | str,
+        epoch: int,
+        branch: EvalBranch | None = None,
     ) -> None:
         lookup_filesystems.append(get_async_filesystem())
         lookup_started.set()

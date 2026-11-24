@@ -35,6 +35,7 @@ JSON_LOG_FORMAT = "json"
 EVAL_LOG_FORMAT = "eval"
 DEFAULT_DISPLAY = "full"
 LOG_SCHEMA_VERSION = 2
+EVAL_SET_ID_FILE = ".eval-set-id"
 SCORED_SUFFIX = "-scored"
 CONSOLE_DISPLAY_WIDTH = 120
 BASE_64_DATA_REMOVED = "<base64-data-removed>"

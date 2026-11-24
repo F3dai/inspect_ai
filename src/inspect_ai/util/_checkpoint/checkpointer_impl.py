@@ -130,6 +130,9 @@ class _CheckpointerSetup(AbstractAsyncContextManager[Checkpointer]):
         # open. Gates ``current()`` so a borrowed session isn't handed out
         # (and fired through) after the scope — and its span machinery — closes.
         self._entered = False
+        # The resume's message for the agent's conversation, held from the
+        # agent's entry (when it restores the conversation) until taken.
+        self._resume_message: str | None = None
 
     async def __aenter__(self) -> Checkpointer:
         if self._cached is not None:
@@ -152,6 +155,7 @@ class _CheckpointerSetup(AbstractAsyncContextManager[Checkpointer]):
             )
         restored: ResumeReport | None = None
         if self._resume_checkpoint is not None:
+            self._resume_message = self._resume_checkpoint.message
             if self._config.on_resume is not None:
                 state = sample_state()
                 if state is None:
@@ -216,7 +220,16 @@ class _CheckpointerSetup(AbstractAsyncContextManager[Checkpointer]):
         # gate on ``_entered``, not ``_cached``.
         return self._cached if self._entered else None
 
+    def take_resume_message(self) -> str | None:
+        message, self._resume_message = self._resume_message, None
+        return message
+
     def close(self) -> None:
+        if self._resume_message is not None:
+            logger.warning(
+                "The resume's message was not added to the conversation: the "
+                "agent opened no agent channel after it resumed."
+            )
         if self._cached is not None:
             self._cached.close()
             self._cached = None

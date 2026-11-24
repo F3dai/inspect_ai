@@ -67,6 +67,7 @@ from inspect_ai._util.constants import (
 )
 from inspect_ai._util.dateutil import datetime_from_iso_format_safe, iso_now
 from inspect_ai._util.error import (
+    PrerequisiteError,
     exception_message,
     is_cancellation_message,
 )
@@ -100,6 +101,7 @@ from inspect_ai.event._sample_init import SampleInitEvent
 from inspect_ai.event._sample_limit import SampleLimitEvent
 from inspect_ai.event._score import ScoreEvent
 from inspect_ai.log import (
+    EvalBranch,
     EvalConfig,
     EvalError,
     EvalLog,
@@ -183,8 +185,12 @@ from inspect_ai.util._anyio import inner_exception
 from inspect_ai.util._checkpoint._layout import (
     delete_sample_checkpoints_dir,
     eval_checkpoints_dir_from_config,
+    sample_checkpoints_dir,
 )
-from inspect_ai.util._checkpoint._resume_copy import copy_resume_payloads
+from inspect_ai.util._checkpoint._resume_copy import (
+    copy_branch_payload,
+    copy_resume_payloads,
+)
 from inspect_ai.util._checkpoint.checkpointer import ResumeCheckpoint
 from inspect_ai.util._checkpoint.checkpointer_factory import create_checkpointer
 from inspect_ai.util._checkpoint.config import (
@@ -347,12 +353,16 @@ class EvalSampleSource(NamedTuple):
     `prior_created` is the prior log's `eval.created` (None with no prior
     log): the attempt's own `created` is made later than it, which keeps
     generated sample ids from repeating (see `dynamic_id_token`).
+    `branch` makes the run a branch of the prior eval rather than an attempt
+    of it: the startup copy replicates only the branched sample's dir, up to
+    the branch checkpoint, and that sample resumes from it.
     """
 
     lookup: SampleLookup
     seed: SeedSource | None = None
     prior_checkpoints_dir: str | None = None
     prior_created: str | None = None
+    branch: EvalBranch | None = None
 
 
 # Bound on concurrent checkpoint-dir probes/deletes in `run_sample` (a retry
@@ -1308,10 +1318,19 @@ async def task_run(options: TaskRunOptions, task_cancel: TaskCancel | None) -> E
         and eval_checkpoints_dir is not None
     ):
         try:
-            await copy_resume_payloads(
-                source_eval_dir=sample_source.prior_checkpoints_dir,
-                destination_eval_dir=eval_checkpoints_dir,
-            )
+            if sample_source.branch is not None:
+                await _copy_branch_checkpoints(
+                    sample_source.branch,
+                    sample_source.prior_checkpoints_dir,
+                    eval_checkpoints_dir,
+                    sample_ids,
+                    epochs,
+                )
+            else:
+                await copy_resume_payloads(
+                    source_eval_dir=sample_source.prior_checkpoints_dir,
+                    destination_eval_dir=eval_checkpoints_dir,
+                )
         except Exception as ex:
             raise RuntimeError(
                 "checkpoint startup copy failed (from "
@@ -1871,7 +1890,10 @@ async def task_run(options: TaskRunOptions, task_cancel: TaskCancel | None) -> E
                             if not isinstance(previous_sample, InvalidatedPrior):
                                 async with checkpoint_probe_limit:
                                     resume_checkpoint = await resolve_resume_checkpoint(
-                                        eval_checkpoints_dir, sample_id, epoch
+                                        eval_checkpoints_dir,
+                                        sample_id,
+                                        epoch,
+                                        logger.eval.branch,
                                     )
                             if resume_checkpoint is None:
                                 async with checkpoint_probe_limit:
@@ -3226,6 +3248,7 @@ async def _task_run_sample_attempt(
                         ),
                         sample_id,
                         state.epoch,
+                        logger.eval.branch if logger is not None else None,
                     )
                     active.checkpointer = create_checkpointer(
                         config=resolved_checkpoint,
@@ -4265,6 +4288,35 @@ def scores_as_logged(
         for name, sample_score in results.items()
         if name in logged
     }
+
+
+async def _copy_branch_checkpoints(
+    branch: EvalBranch,
+    source_eval_dir: str,
+    destination_eval_dir: str,
+    sample_ids: list[int | str],
+    epochs: int,
+) -> None:
+    """Copy the branched sample's checkpoints to where a branch run resumes from.
+
+    The run's one sample resumes from its own checkpoints dir, which is named
+    for its id in this run's dataset and its only epoch.
+    """
+    if len(sample_ids) != 1 or epochs != 1:
+        raise PrerequisiteError(
+            "A branch runs one sample for one epoch, but sample id "
+            f"{branch.sample_id!r} selects {len(sample_ids)} sample(s) of the "
+            f"task's dataset over {epochs} epoch(s)."
+        )
+    await copy_branch_payload(
+        source_sample_dir=sample_checkpoints_dir(
+            source_eval_dir, branch.sample_id, branch.epoch
+        ),
+        destination_sample_dir=sample_checkpoints_dir(
+            destination_eval_dir, sample_ids[0], 1
+        ),
+        checkpoint_id=branch.checkpoint_id,
+    )
 
 
 # we can reuse samples from a previous eval_log if and only if:

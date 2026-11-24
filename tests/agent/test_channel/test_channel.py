@@ -33,6 +33,7 @@ from inspect_ai.model._chat_message import (
     ChatMessageUser,
 )
 from inspect_ai.tool._tool_call import ToolCall
+from inspect_ai.util._checkpoint.checkpointer_noop import _NoopCheckpointer
 
 # ---------------------------------------------------------------------------
 # Ambient accessor / inert default
@@ -885,6 +886,7 @@ async def test_cancelled_gate_unwinds_channel(monkeypatch: pytest.MonkeyPatch) -
 
     class FakeSample:
         acp_transport = FakeTransport()
+        checkpointer = _NoopCheckpointer()
 
     monkeypatch.setattr("inspect_ai.log._samples.sample_active", lambda: FakeSample())
 

@@ -359,15 +359,43 @@ def resolve_previous_task(
     sequence: int,
     eval_checkpoint: CheckpointConfig | None = None,
 ) -> ResolvedTask:
-    # carry token usage forward from the prior log so cumulative totals stay
-    # accurate across retries. Deep-copy so the prior log is never mutated.
-    prior_stats = previous_task.log.stats
-    initial_model_usage = (
-        copy.deepcopy(prior_stats.model_usage) if prior_stats.model_usage else None
+    prior_checkpoints_dir = eval_checkpoints_dir_from_config(
+        previous_task.log_info.name
+        if previous_task.log_info is not None
+        else previous_task.log.location,
+        loaded_task.checkpoint,
+        eval_checkpoint,
     )
-    initial_role_usage = (
-        copy.deepcopy(prior_stats.role_usage) if prior_stats.role_usage else None
-    )
+    branch = previous_task.branch
+    if branch is None:
+        # carry token usage forward from the prior log so cumulative totals stay
+        # accurate across retries. Deep-copy so the prior log is never mutated.
+        prior_stats = previous_task.log.stats
+        initial_model_usage = (
+            copy.deepcopy(prior_stats.model_usage) if prior_stats.model_usage else None
+        )
+        initial_role_usage = (
+            copy.deepcopy(prior_stats.role_usage) if prior_stats.role_usage else None
+        )
+        sample_source = eval_log_sample_source(
+            previous_task.log,
+            previous_task.log_info,
+            loaded_task.dataset,
+            prior_checkpoints_dir,
+        )
+    else:
+        # a branch is a new run, not an attempt of the prior one: it reuses no
+        # prior sample and carries no usage, and its sample resumes from the
+        # branch checkpoint
+        if prior_checkpoints_dir is None:
+            raise PrerequisiteError(
+                f"Task '{loaded_task.name}' disables checkpointing, so a branch "
+                "of it has no checkpoint to restore."
+            )
+        initial_model_usage = initial_role_usage = None
+        sample_source = eval_log_sample_source(
+            None, None, loaded_task.dataset
+        )._replace(prior_checkpoints_dir=prior_checkpoints_dir, branch=branch)
 
     _retain_untrusted_content(loaded_task, previous_task.log)
 
@@ -384,21 +412,12 @@ def resolve_previous_task(
         checkpoint=loaded_task.checkpoint,
         sequence=sequence,
         id=previous_task.id,
-        sample_source=eval_log_sample_source(
-            previous_task.log,
-            previous_task.log_info,
-            loaded_task.dataset,
-            eval_checkpoints_dir_from_config(
-                previous_task.log_info.name
-                if previous_task.log_info is not None
-                else previous_task.log.location,
-                loaded_task.checkpoint,
-                eval_checkpoint,
-            ),
-        ),
+        sample_source=sample_source,
         initial_model_usage=initial_model_usage,
         initial_role_usage=initial_role_usage,
         input_media_policy="trusted_pre_run",
+        # a retry of a branched eval is still a branch of the same checkpoint
+        branch=branch or previous_task.log.eval.branch,
     )
 
 

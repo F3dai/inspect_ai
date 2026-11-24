@@ -53,6 +53,7 @@ from ._file import (
 from ._headline import ResolvedHeadlineMetric, headline_metric
 from ._log import (
     ConnectionLimitChange,
+    EvalBranch,
     EvalConfig,
     EvalDataset,
     EvalLog,
@@ -111,6 +112,7 @@ __all__ = [
     "SentinelConfig",
     "SentinelEntry",
     "EvalError",
+    "EvalBranch",
     "EvalDataset",
     "EvalLog",
     "EvalMetric",

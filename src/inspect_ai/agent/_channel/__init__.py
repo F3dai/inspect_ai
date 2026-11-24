@@ -29,7 +29,11 @@ import contextlib
 from contextvars import ContextVar
 from typing import AsyncIterator, Callable, Iterator, Sequence
 
-from inspect_ai.model._chat_message import ChatMessage, ChatMessageTool
+from inspect_ai.model._chat_message import (
+    ChatMessage,
+    ChatMessageTool,
+    ChatMessageUser,
+)
 
 from .channel import AgentChannel
 from .exceptions import AgentInterrupted
@@ -119,6 +123,9 @@ async def agent_channel() -> AsyncIterator[AgentChannel]:
 
     The channel keeps the turn gate set by ``turn_gate()`` when it opens,
     if any, and calls the gate's ``closed()`` on exit.
+
+    Opening also posts a resumed sample's message for the conversation, if
+    one is pending (see ``_post_resume_message``).
     """
     ch = AgentChannel()
     ch._gate = current_turn_gate()
@@ -136,6 +143,7 @@ async def agent_channel() -> AsyncIterator[AgentChannel]:
                 bound_session = sample.acp_transport
     except Exception:  # noqa: BLE001 — best-effort hook; never crash the agent
         pass
+    _post_resume_message(ch)
     token = _channel_var.set(ch)
     try:
         yield ch
@@ -150,6 +158,24 @@ async def agent_channel() -> AsyncIterator[AgentChannel]:
                     bound_session.unbind(ref)
                 except Exception:  # noqa: BLE001
                     pass
+
+
+def _post_resume_message(ch: AgentChannel) -> None:
+    """Post a resumed sample's message for the agent's conversation to ``ch``.
+
+    A branch can add a user message at its branch point. The sample's
+    checkpointer holds it from the agent's entry, which restores the
+    conversation, until the first channel the agent then opens takes it:
+    the loop's next turn boundary appends it after the restored messages.
+    """
+    from inspect_ai.log._samples import sample_active
+
+    sample = sample_active()
+    message = sample.checkpointer.take_resume_message() if sample is not None else None
+    if message is not None:
+        ch._post(
+            UserMessage(message=ChatMessageUser(content=message, source="operator"))
+        )
 
 
 def current_agent_channel() -> AgentChannel:

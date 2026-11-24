@@ -32,6 +32,7 @@ from inspect_ai._util.registry import (
 from inspect_ai.dataset import Dataset
 from inspect_ai.event._event import Event
 from inspect_ai.log import (
+    EvalBranch,
     EvalConfig,
     EvalDataset,
     EvalError,
@@ -228,6 +229,7 @@ class TaskLogger:
         header_only: bool,
         dynamic_dataset: bool = False,
         prior_created: str | None = None,
+        branch: EvalBranch | None = None,
     ) -> None:
         packages = {
             PKG_NAME: importlib_metadata.version(PKG_NAME),
@@ -325,6 +327,7 @@ class TaskLogger:
             packages=packages,
             metadata=metadata,
             viewer=viewer,
+            branch=branch,
         )
 
         # stack recorder and location (set when init() has the recorder's

@@ -38,10 +38,12 @@ class ResumeCheckpoint:
     dir (the retry startup copy put it there — see ``_resume_copy``),
     so no location travels here. ``attempt`` distinguishes mid-agent
     resume from scoring-phase resume; detection reads the latest
-    parseable checkpoint file to decide which.
+    parseable checkpoint file to decide which. ``message`` is a user
+    message to add to the conversation the agent restores (a branch's).
     """
 
     attempt: Literal["initial", "resume", "resume_for_scoring"]
+    message: str | None = None
 
 
 class Checkpointer(Protocol):
@@ -202,6 +204,14 @@ class CheckpointerSetup(Protocol):
 
         Returns the cached session once ``__aenter__`` has run, else
         ``None``. Backs :func:`current_checkpointer`.
+        """
+        ...
+
+    def take_resume_message(self) -> str | None:
+        """The resume's user message for the agent's conversation, once.
+
+        ``None`` until the agent has entered the checkpointer, which is
+        when it restores its conversation, and after the message is taken.
         """
         ...
 

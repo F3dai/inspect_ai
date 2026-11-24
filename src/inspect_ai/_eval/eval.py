@@ -62,6 +62,7 @@ from inspect_ai._util.constants import (
     DEFAULT_EPOCHS,
     DEFAULT_LOG_FORMAT,
     DEFAULT_LOG_SHARED,
+    EVAL_SET_ID_FILE,
     JSON_LOG_FORMAT,
 )
 from inspect_ai._util.error import PrerequisiteError
@@ -77,7 +78,13 @@ from inspect_ai.approval._policy import (
     approval_policies_from_config,
     config_from_approval_policies,
 )
-from inspect_ai.log import EvalConfig, EvalLog, EvalLogInfo, IncompleteAction
+from inspect_ai.log import (
+    EvalBranch,
+    EvalConfig,
+    EvalLog,
+    EvalLogInfo,
+    IncompleteAction,
+)
 from inspect_ai.log._file import read_eval_log_async
 from inspect_ai.log._recorders import create_recorder_for_format
 from inspect_ai.log._recorders.buffer import cleanup_sample_buffers
@@ -105,6 +112,11 @@ from inspect_ai.solver._chain import chain, is_solver_sequence
 from inspect_ai.solver._solver import Solver, SolverSpec
 from inspect_ai.util import SandboxEnvironmentType
 from inspect_ai.util._checkpoint import CheckpointConfig, normalize_checkpoint
+from inspect_ai.util._checkpoint._layout import (
+    eval_checkpoints_dir_from_config,
+    sample_checkpoints_dir,
+)
+from inspect_ai.util._checkpoint._resume_copy import branchable_checkpoint
 from inspect_ai.util._concurrency import AdaptiveConcurrency
 from inspect_ai.util._display import (
     DisplayType,
@@ -1842,6 +1854,8 @@ async def eval_retry_async(
 async def _eval_previous_async(
     eval_log: EvalLog,
     *,
+    branch: EvalBranch | None = None,
+    model: str | Model | None = None,
     log_level: str | None = None,
     log_level_transcript: str | None = None,
     log_dir: str | None = None,
@@ -1883,7 +1897,12 @@ async def _eval_previous_async(
 
     The task, solver, model and eval configuration are rebuilt from
     `eval_log`; an argument that is not `None` overrides the logged
-    value. See `eval_retry_async` for the arguments.
+    value. See `eval_retry_async` for the arguments it shares.
+
+    Without `branch` the run is a retry of `eval_log`: another attempt of
+    the same task run, reusing its completed samples. With `branch`, a
+    checkpoint of `eval_log`, it is a new task run of the branched sample
+    alone, resumed from that checkpoint. `model` replaces the logged model.
     """
     # the task needs to be either filesystem or registry
     # based in order to do a retry (we don't have enough
@@ -1922,12 +1941,17 @@ async def _eval_previous_async(
         else None
     )
 
-    # resolve the model
-    model = get_model(
-        model=eval_log.eval.model,
-        config=eval_log.eval.model_generate_config,
-        base_url=eval_log.eval.model_base_url,
-        **eval_log.eval.model_args,
+    # resolve the model: the logged instance, unless the caller names another
+    # (which the logged instance's config, base url and args do not describe)
+    task_model = (
+        get_model(model)
+        if model is not None
+        else get_model(
+            model=eval_log.eval.model,
+            config=eval_log.eval.model_generate_config,
+            base_url=eval_log.eval.model_base_url,
+            **eval_log.eval.model_args,
+        )
     )
 
     # resolve model roles
@@ -1955,6 +1979,14 @@ async def _eval_previous_async(
         if eval_log.eval.config.epochs
         else None
     )
+    if branch is not None:
+        # a new task run of the branched sample alone. One epoch has nothing
+        # to reduce, and a logged reducer may need more epochs than that.
+        task_id = uuid()
+        limit = None
+        sample_id = _requalify_sample_ids(eval_log.eval.task, branch.sample_id)
+        sample_shuffle = None
+        epochs = Epochs(1, "mean")
     approval = eval_log.eval.config.approval
     review = eval_log.eval.config.review
     sentinel = eval_log.eval.config.sentinel
@@ -2081,15 +2113,17 @@ async def _eval_previous_async(
                 id=task_id,
                 task=task,
                 task_args=task_args,
-                model=None,
+                # a model the caller names outranks one the task declares
+                model=task_model if model is not None else None,
                 model_roles=None,
                 sandbox=resolve_task_file_sandbox(
                     eval_log.eval.task_file, eval_log.eval.sandbox
                 ),
                 log=eval_log,
                 log_info=None,
+                branch=branch,
             ),
-            model=model,
+            model=task_model,
             model_roles=model_roles,
             task_args=task_args,
             sandbox=eval_log.eval.sandbox,
@@ -2145,6 +2179,165 @@ async def _eval_previous_async(
             **dict(config),
         )
     )[0]
+
+
+def eval_branch(
+    log: str | EvalLogInfo | EvalLog,
+    *,
+    sample_id: str | int,
+    checkpoint_id: int,
+    epoch: int = 1,
+    model: str | Model | None = None,
+    message: str | None = None,
+    checkpoint: CheckpointConfig | bool | None = None,
+    log_dir: str | None = None,
+    log_level: str | None = None,
+    log_level_transcript: str | None = None,
+    sandbox_cleanup: bool | None = None,
+    debug_errors: bool | None = None,
+    display: DisplayType | None = None,
+) -> EvalLog:
+    """Branch an evaluation from a checkpoint of one of its samples.
+
+    Runs the sample again as a new eval that starts at the checkpoint
+    rather than at the beginning: the sample's sandbox files, conversation,
+    store and limit usage are restored to the checkpoint and the agent
+    continues from there. The eval branched from is not modified, and can
+    be branched any number of times. The new eval's log records the
+    checkpoint it was branched from in `eval.branch`.
+
+    The task, solver and eval configuration are those the log records.
+    A sample can be branched from any checkpoint it committed while its
+    agent was running, whatever the sample's outcome.
+
+    Args:
+        log: Log of the eval to branch from.
+        sample_id: Id of the sample to branch.
+        checkpoint_id: Checkpoint of the sample to start from.
+        epoch: Epoch of the sample to branch.
+        model: Model to continue with (defaults to the model of the eval
+            branched from).
+        message: User message to add to the conversation at the branch point.
+        checkpoint: Checkpoint configuration for the branch (defaults to
+            checkpointing with the default trigger). The log does not record
+            the configuration of the eval branched from: one given to
+            `eval()` rather than declared by the task must be given again
+            here, with the same storage location, sandbox paths and
+            snapshot strategies.
+        log_dir: Output path for logging results (defaults to file log in
+            ./logs directory).
+        log_level: Level for logging to the console: "debug", "http",
+            "sandbox", "info", "warning", "error", "critical", or "notset"
+            (defaults to "warning")
+        log_level_transcript: Level for logging to the log file (defaults
+            to "info")
+        sandbox_cleanup: Cleanup sandbox environments after task completes
+            (defaults to True)
+        debug_errors: Raise task errors (rather than logging them) so they
+            can be debugged (defaults to False).
+        display: Task display type (defaults to "full").
+
+    Returns:
+        Log of the branch.
+    """
+    # standard platform init for top level entry points
+    platform_init()
+    init_eval_display(display, None, None, None)
+
+    async def run_task_app() -> EvalLog:
+        return await eval_branch_async(
+            log,
+            sample_id=sample_id,
+            checkpoint_id=checkpoint_id,
+            epoch=epoch,
+            model=model,
+            message=message,
+            checkpoint=checkpoint,
+            log_dir=log_dir,
+            log_level=log_level,
+            log_level_transcript=log_level_transcript,
+            sandbox_cleanup=sandbox_cleanup,
+            debug_errors=debug_errors,
+        )
+
+    return task_display().run_task_app(with_async_fs(run_task_app))
+
+
+async def eval_branch_async(
+    log: str | EvalLogInfo | EvalLog,
+    *,
+    sample_id: str | int,
+    checkpoint_id: int,
+    epoch: int = 1,
+    model: str | Model | None = None,
+    message: str | None = None,
+    checkpoint: CheckpointConfig | bool | None = None,
+    log_dir: str | None = None,
+    log_level: str | None = None,
+    log_level_transcript: str | None = None,
+    sandbox_cleanup: bool | None = None,
+    debug_errors: bool | None = None,
+) -> EvalLog:
+    """Branch an evaluation from a checkpoint of one of its samples.
+
+    See `eval_branch` for the behavior and the arguments.
+    """
+    eval_log = (
+        log
+        if isinstance(log, EvalLog)
+        else await read_eval_log_async(
+            log.name if isinstance(log, EvalLogInfo) else log, header_only=True
+        )
+    )
+    checkpoint = normalize_checkpoint(True if checkpoint is None else checkpoint)
+
+    # fail before any sandbox starts when the checkpoint cannot be branched
+    checkpoints_dir = eval_checkpoints_dir_from_config(
+        eval_log.location, None, checkpoint
+    )
+    if checkpoints_dir is None:
+        raise PrerequisiteError(
+            "A branch restores a checkpoint, so it cannot run with "
+            "checkpointing disabled."
+        )
+    await branchable_checkpoint(
+        sample_checkpoints_dir(checkpoints_dir, sample_id, epoch), checkpoint_id
+    )
+    _check_branch_log_dir(log_dir or os.environ.get("INSPECT_LOG_DIR", "./logs"))
+
+    return await _eval_previous_async(
+        eval_log,
+        branch=EvalBranch(
+            log=absolute_file_path(eval_log.location),
+            eval_id=eval_log.eval.eval_id,
+            sample_id=sample_id,
+            epoch=epoch,
+            checkpoint_id=checkpoint_id,
+            message=message,
+        ),
+        model=model,
+        checkpoint=checkpoint,
+        log_dir=log_dir,
+        log_level=log_level,
+        log_level_transcript=log_level_transcript,
+        sandbox_cleanup=sandbox_cleanup,
+        debug_errors=debug_errors,
+    )
+
+
+def _check_branch_log_dir(log_dir: str) -> None:
+    """Refuse to write a branch's log into an eval set's log directory.
+
+    An eval set reads each log in its directory as an attempt of one of its
+    tasks, and a branch runs one sample of the task its log names.
+    """
+    fs = filesystem(log_dir)
+    if fs.exists(f"{log_dir}{fs.sep}{EVAL_SET_ID_FILE}"):
+        raise PrerequisiteError(
+            f"'{log_dir}' is the log directory of an eval set, which would take "
+            "a branch's log for a run of the task. Write the branch's log to "
+            "another directory with log_dir."
+        )
 
 
 def eval_init(

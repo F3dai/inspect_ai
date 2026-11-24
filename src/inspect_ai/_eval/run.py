@@ -425,6 +425,7 @@ async def eval_run(
                     prior_created=resolved_task.sample_source.prior_created
                     if resolved_task.sample_source is not None
                     else None,
+                    branch=resolved_task.branch,
                 )
 
                 # each attempt sets up its seed samples' sandboxes, and a

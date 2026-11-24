@@ -65,6 +65,7 @@ from inspect_ai._sentinel._config import (
 )
 from inspect_ai._util._async import run_coroutine
 from inspect_ai._util.azure import call_with_azure_auth_fallback
+from inspect_ai._util.constants import EVAL_SET_ID_FILE
 from inspect_ai._util.dotenv import init_dotenv
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.file import (
@@ -1547,7 +1548,6 @@ async def _keep_alive_park(eval_set_id: str, log_dir: str) -> None:
 
 
 def eval_set_id_for_log_dir(log_dir: str, eval_set_id: str | None = None) -> str:
-    EVAL_SET_ID_FILE = ".eval-set-id"
     fs = filesystem(log_dir)
     eval_set_id_file = f"{log_dir}{fs.sep}{EVAL_SET_ID_FILE}"
     if fs.exists(eval_set_id_file):

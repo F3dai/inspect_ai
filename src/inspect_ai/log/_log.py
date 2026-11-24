@@ -1128,6 +1128,28 @@ class EvalShards(BaseModel):
     """One entry per shard with a current attempt, in shard order."""
 
 
+class EvalBranch(BaseModel):
+    """The checkpoint of another eval's sample that an eval was branched from."""
+
+    log: str
+    """Location of the log that was branched from, when the branch was created."""
+
+    eval_id: str
+    """Globally unique id of the eval that was branched from."""
+
+    sample_id: int | str
+    """Id of the sample that was branched from."""
+
+    epoch: int
+    """Epoch of the sample that was branched from."""
+
+    checkpoint_id: int
+    """Checkpoint the branch started from."""
+
+    message: str | None = Field(default=None)
+    """User message added to the conversation at the branch point."""
+
+
 class EvalSpec(BaseModel):
     """Eval target and configuration."""
 
@@ -1239,6 +1261,9 @@ class EvalSpec(BaseModel):
 
     shards: EvalShards | None = Field(default=None)
     """Shards merged into this log (merged logs only)."""
+
+    branch: EvalBranch | None = Field(default=None)
+    """Checkpoint this eval was branched from (branched evals only)."""
 
     # allow field model_args
     model_config = ConfigDict(protected_namespaces=())

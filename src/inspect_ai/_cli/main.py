@@ -8,7 +8,12 @@ from .acp import acp_command
 from .cache import cache_command
 from .ctl import ctl_command
 from .download import download_command
-from .eval import eval_command, eval_retry_command, eval_set_command
+from .eval import (
+    eval_branch_command,
+    eval_command,
+    eval_retry_command,
+    eval_set_command,
+)
 from .info import info_command
 from .list import list_command
 from .log import log_command
@@ -47,6 +52,7 @@ inspect.add_command(download_command)
 inspect.add_command(eval_command)
 inspect.add_command(eval_set_command)
 inspect.add_command(eval_retry_command)
+inspect.add_command(eval_branch_command)
 inspect.add_command(info_command)
 inspect.add_command(list_command)
 inspect.add_command(log_command)
