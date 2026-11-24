@@ -42,6 +42,9 @@ from inspect_ai.event._subtask import SubtaskEvent
 from inspect_ai.event._timeline import TimelineEvent, timeline_build
 from inspect_ai.event._tool import ToolEvent
 from inspect_ai.log import (
+    EvalBranch,
+    EvalConfig,
+    EvalDataset,
     EvalError,
     EvalShardEntry,
     EvalShards,
@@ -3600,3 +3603,33 @@ def test_log_without_description_reads(log_file: str) -> None:
     assert log.samples
     assert all(sample.description is None for sample in log.samples)
     assert all(sample.summary().description is None for sample in log.samples)
+
+
+@pytest.mark.parametrize("format", ["eval", "json"])
+def test_eval_branch_round_trips(
+    tmp_path: Path, format: Literal["eval", "json"]
+) -> None:
+    """A branched eval's log records the checkpoint it was branched from."""
+    branch = EvalBranch(
+        log="logs/parent.eval",
+        eval_id="parent-eval-id",
+        sample_id="s1",
+        epoch=2,
+        checkpoint_id=3,
+        message="Try another approach.",
+    )
+    log = EvalLog(
+        eval=EvalSpec(
+            created=datetime.now(timezone.utc).isoformat(),
+            task="test_task",
+            model="mockllm/model",
+            dataset=EvalDataset(),
+            config=EvalConfig(),
+            branch=branch,
+        )
+    )
+    target = str(tmp_path / f"branch.{format}")
+
+    write_eval_log(log, target, format=format)
+
+    assert read_eval_log(target, header_only=True).eval.branch == branch

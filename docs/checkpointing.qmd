@@ -82,6 +82,53 @@ For incomplete samples, Inspect locates the checkpoint directory, restores each 
 
 By default checkpoints are deleted once the eval completes successfully; use `retention="retain"` in the `CheckpointConfig` to preserve them.
 
+### Branching
+
+A checkpoint is also a place to branch an eval from. A branch runs one sample again as a new eval that starts at a checkpoint the sample committed, rather than at the beginning, and continues from there. It can continue with a different model, or with a user message added at the branch point:
+
+``` bash
+inspect eval ctf.py --checkpoint=turn:1         # checkpoint each turn
+inspect eval-branch logs/<log-file-name>.eval   # list its checkpoints
+inspect eval-branch logs/<log-file-name>.eval \
+    --sample-id web-1 --checkpoint-id 6 \
+    --model openai/gpt-6-luna \
+    --message "Try a different approach."
+```
+
+Or from Python:
+
+``` python
+from inspect_ai import eval_branch
+
+log = eval_branch(
+    "logs/<log-file-name>.eval",
+    sample_id="web-1",
+    checkpoint_id=6,
+    model="openai/gpt-6-luna",
+    message="Try a different approach.",
+)
+```
+
+The sample is restored to the checkpoint as described above for recovery, and then the agent runs. The eval that was branched from is not modified, so it can be branched any number of times, and a branch can itself be branched. A branch's log records the checkpoint it came from in `eval.branch`.
+
+Some things to keep in mind when branching:
+
+-   A sample can be branched from any checkpoint it committed while its agent was running, whatever the sample's outcome. The checkpoint taken when the agent completes is not one of them, as nothing is left to run.
+
+-   The checkpoints are the ones the [trigger](#triggers) recorded. `TurnInterval(every=1)` records one for each turn, at the cost of a snapshot per turn.
+
+-   Retain the checkpoints of an eval you intend to branch (`retention="retain"`).
+
+-   The task, solver and eval configuration are those the log records. A log does not record the checkpoint configuration: if the eval was given one (rather than the task declaring it), give the branch the same one.
+
+-   A branch inherits the sample's limits, and its usage up to the checkpoint.
+
+-   The message is delivered to the agent as an operator message, so it reaches agents that follow the [intervention](intervention.qmd) pattern (as the built-in `react()` and `deepagent()` do).
+
+-   A different model is given the conversation the earlier model produced. Providers differ in what they accept of another model's reasoning; `reasoning_history` controls what is replayed.
+
+-   A branch's log cannot be written to the log directory of an eval set.
+
 ### Triggers
 
 Checkpoints are recorded according to the configured `trigger`. All triggers fire at the next turn boundary after the trigger condition is reached. Agents are never interrupted mid-turn, and in-flight tool calls are never paused to checkpoint.

@@ -1,0 +1,7 @@
+services:
+  default:
+    image: debian:bookworm-slim
+    command: ["sleep", "infinity"]
+    init: true
+    working_dir: /work
+    network_mode: none
