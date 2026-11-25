@@ -104,6 +104,40 @@ A branch keeps the logged eval-level generate config. The logged model's
 own config, base URL and arguments describe that model instance and are not
 applied to a model the caller names.
 
+## What a checkpoint costs
+
+A branch can only start where a checkpoint was taken, so branching invites
+`TurnInterval(every=1)`. Measured on one machine, with a sandbox capturing
+five small files:
+
+| Sandbox strategy | Time per checkpoint |
+|---|---|
+| `ResticSnapshots` (the default) | about 3.1 s |
+| `ArchiveSnapshots` | 0.94 s |
+
+The data is negligible in both. With restic the time is a fixed cost: each
+restic command takes 0.5 to 0.7 s to open its repository (key derivation; a
+repository created with `--insecure-no-password` opens no faster), and a
+checkpoint runs about five of them in sequence for a sandbox. They are the
+backup in the sandbox and, on the host, the snapshot listings before and
+after the copy-out and the two commands of `list_changed_files`. The host
+backup runs in parallel with these, and is what remains for the archive
+strategy.
+
+In the restic runs the checkpoints took about twice as long as the model
+calls. Options, none of which this prototype implements:
+
+- Use the archive strategy when the captured paths are small.
+- Take the changed-file list from the backup's own output, or make it
+  optional. It is two of the five commands.
+- Merge the two snapshot listings around the copy-out.
+- Take the snapshot while the model generates its next reply. The sandbox
+  does not change during a generate, so the snapshot only has to finish
+  before the next tool call.
+
+A large sandbox will weigh these differently, and will make the branch copy
+and the restore matter, which they do not at this size.
+
 ## Validation
 
 Run with real models through OpenRouter, Docker sandboxes and the default
@@ -120,9 +154,12 @@ one direction: a DeepSeek run that produced reasoning was branched to
 Claude, which accepted it. The Claude runs produced no reasoning, with
 reasoning requested, so the other direction was not exercised.
 
-Not exercised: the archive strategy and remote checkpoint locations (the
-copy is covered by unit tests for both layouts, the full path by neither),
-direct provider APIs, and bridged agents.
+The archive strategy was also checked by hand: an eval that used it was
+branched to another model, and the branch found the files of its
+checkpoint.
+
+Not exercised: remote checkpoint locations, direct provider APIs, and
+bridged agents.
 
 ## Not covered {#not-covered}
 
@@ -162,7 +199,8 @@ direct provider APIs, and bridged agents.
 4. **Later snapshots travel with the copy.** For the restic strategy the
    branch's repository holds the later checkpoints' data, unreferenced, and
    ingress places the repository in the branch's sandbox. Pruning after the
-   orphans are forgotten would remove it, at a cost per branch.
+   orphans are forgotten would remove it, at a cost per branch. The archive
+   strategy does not have this: resume deletes the later archives.
 5. **Eval sets.** A branch's log in an eval set's log directory would be
    read as a run of the task, so `eval_branch()` refuses that directory.
    Eval sets could instead ignore logs with `eval.branch`.
